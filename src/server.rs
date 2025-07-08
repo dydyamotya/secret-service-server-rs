@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::error;
 use crate::object::collection;
 use crate::object::service;
@@ -8,12 +10,14 @@ pub struct SecretServiceServer {
     connection: zbus::Connection,
     dbus_name: String,
     start_event: event_listener::Event,
+    state_path: Option<PathBuf>
 }
 
 impl SecretServiceServer {
     pub async fn new(
         dbus_name: &str,
         start_event: event_listener::Event,
+        state_path: Option<PathBuf>
     ) -> Result<Self, error::Error> {
         let connection = zbus::Connection::session().await?;
 
@@ -21,11 +25,15 @@ impl SecretServiceServer {
             connection,
             dbus_name: dbus_name.to_owned(),
             start_event,
+            state_path,
         })
     }
 
     pub async fn run(self) -> Result<(), error::Error> {
-        let service = service::Service::new();
+        let service = match self.state_path.as_ref() {
+            Some(state_path) => service::Service::async_new(state_path, self.connection.object_server()).await?,
+            None => service::Service::new(None)
+        };
         let (interface_path, _) = service.serve_at(self.connection.object_server()).await?;
 
         log::info!("Serving Secret Service interface.");

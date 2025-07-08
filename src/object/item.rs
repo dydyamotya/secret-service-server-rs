@@ -2,13 +2,16 @@ use std::collections;
 use std::iter::Iterator;
 use std::time;
 
+use serde::Deserialize;
+use serde::Serialize;
+
 use crate::error;
 use crate::object::collection;
 use crate::object::session;
 use crate::object::{DbusChildObject, DbusObject};
 use crate::secret;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub attributes: collections::HashMap<String, String>,
     pub created: u64,

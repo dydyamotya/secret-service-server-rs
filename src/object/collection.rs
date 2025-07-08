@@ -1,6 +1,10 @@
 use std::collections;
 use std::iter::Iterator;
+use std::path::PathBuf;
 use std::time;
+
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::error;
 use crate::object::item;
@@ -8,7 +12,7 @@ use crate::object::service;
 use crate::object::{DbusChildObject, DbusObject, DbusParentObject};
 use crate::secret;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Collection {
     pub alias: Option<String>,
     pub created: u64,
@@ -20,6 +24,8 @@ pub struct Collection {
         collections::HashMap<zvariant::OwnedObjectPath, collections::HashSet<(String, String)>>,
     pub modified: u64,
     pub parent_path: zvariant::OwnedObjectPath,
+    #[serde(skip)]
+    state_path: Option<PathBuf>,
 }
 
 #[derive(zvariant::DeserializeDict, zvariant::SerializeDict, zvariant::Type)]
@@ -91,6 +97,7 @@ impl Collection {
             items_with_attributes: collections::HashMap::new(),
             modified: created,
             parent_path: service.get_object_path().clone(),
+            state_path: service.state_path.clone()
         }
     }
 
@@ -110,6 +117,7 @@ impl Collection {
             items_with_attributes: collections::HashMap::new(),
             modified: created,
             parent_path: service.get_object_path().clone(),
+            state_path: service.state_path.clone()
         }
     }
 
@@ -136,6 +144,19 @@ impl Collection {
         self.items.insert(item_object_path.clone());
         self.items_with_attributes
             .insert(item_object_path.clone(), attributes_set);
+    }
+
+    async fn item_to_file(&self, item: &item::Item) -> Result<(), error::Error> {
+        if let Some(state_path) = self.state_path.as_ref() {
+            let jsoned_item = serde_json::to_vec(item)?;
+            let collection_path = state_path.join("collections").join(self.label.as_str());
+            if tokio::fs::try_exists(collection_path.as_path()).await.is_err() {
+                tokio::fs::create_dir(collection_path.as_path()).await?;
+            }
+            let item_path = collection_path.join(&item.label);
+            tokio::fs::write(item_path, jsoned_item).await?;
+        }
+        Ok(())
     }
 }
 
@@ -168,6 +189,9 @@ impl Collection {
             object_server,
         )
         .await?;
+
+        self.item_to_file(&new_item).await?;
+
         let (item_path, is_new) = new_item.serve_at(object_server).await?;
 
         if is_new {
@@ -209,6 +233,10 @@ impl Collection {
         }
 
         self.remove::<Collection>(object_server).await?;
+
+        if let Some(state_path) = &self.state_path {
+            tokio::fs::remove_dir_all(state_path.join("collections").join(&self.label)).await?;
+        }
 
         let removed = self.remove_from_parent(object_server).await;
 
@@ -326,14 +354,13 @@ mod tests {
 
         let cloned_dbus_name = dbus_name.clone();
         let run_server_handle = tokio::spawn(async move {
-            let server = server::SecretServiceServer::new(&cloned_dbus_name, start_event)
+            let server = server::SecretServiceServer::new(&cloned_dbus_name, start_event, None)
                 .await
                 .unwrap();
             server.run().await.unwrap();
         });
 
-        if let Err(_) =
-            tokio::time::timeout(time::Duration::from_secs(10), start_event_listener).await
+        if (tokio::time::timeout(time::Duration::from_secs(10), start_event_listener).await).is_err()
         {
             if run_server_handle.is_finished() {
                 run_server_handle.await.unwrap();
@@ -539,8 +566,8 @@ mod tests {
         let (encrypted_secret, iv) = algorithm.encrypt(plaintext_secret.as_bytes());
         let secret = secret::Secret {
             session: session_path.clone(),
-            value: encrypted_secret.into(),
-            parameters: iv.into(),
+            value: encrypted_secret,
+            parameters: iv,
             content_type: "text/plain; charset=utf8".to_string(),
         };
         let reply = connection
@@ -660,7 +687,7 @@ mod tests {
         let found_items: Vec<zvariant::ObjectPath<'_>> = body.deserialize().unwrap();
 
         assert_eq!(found_items.len(), 1);
-        assert_eq!(found_items.get(0).unwrap(), &item_object_path);
+        assert_eq!(found_items.first().unwrap(), &item_object_path);
 
         run_server_handle.abort();
         assert!(run_server_handle.await.unwrap_err().is_cancelled());

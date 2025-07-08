@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, io};
 use zbus::DBusError;
 
 #[derive(Debug)]
@@ -16,6 +16,8 @@ pub enum Error {
     SessionIsClosed,
     Zbus(zbus::Error),
     Zvariant(zvariant::Error),
+    IoError(String),
+    TransformingError(String),
 }
 
 impl DBusError for Error {
@@ -98,6 +100,8 @@ impl fmt::Display for Error {
 
             Error::Zbus(inner) => write!(f, "{}", inner),
             Error::Zvariant(inner) => write!(f, "{}", inner),
+            Error::IoError(message) => write!(f, "{}", message),
+            Error::TransformingError(message) => write!(f, "{}", message),
         }
     }
 }
@@ -131,3 +135,16 @@ impl From<hkdf::InvalidLength> for Error {
         Error::InvalidArgs("OpenSession".to_owned(), format!("{}", value))
     }
 }
+
+impl From<io::Error> for Error {
+    fn from(value: io::Error) -> Self {
+        Error::IoError(format!("{}", value))
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(value: serde_json::Error) -> Self {
+        Error::TransformingError(format!("{}", value))
+    }
+}
+

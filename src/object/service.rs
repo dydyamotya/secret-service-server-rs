@@ -1,12 +1,17 @@
 use std::collections;
+use std::path::Path;
+use std::path::PathBuf;
 use std::str;
 
 use futures::{stream, StreamExt};
+use zvariant::OwnedObjectPath;
 
 use crate::error;
 use crate::object::collection;
+use crate::object::collection::Collection;
 use crate::object::collection::CollectionSignals;
 use crate::object::item;
+use crate::object::item::Item;
 use crate::object::session;
 use crate::object::{DbusChildObject, DbusObject, DbusParentObject};
 
@@ -17,20 +22,107 @@ use crate::secret;
 pub struct Service {
     aliases: collections::HashMap<String, zvariant::OwnedObjectPath>,
     pub collections: collections::HashSet<zvariant::OwnedObjectPath>,
+    pub state_path: Option<PathBuf>,
 }
 
 impl Service {
-    pub fn new() -> Self {
+    pub fn new(state_path: Option<PathBuf>) -> Self {
         Self {
             aliases: collections::HashMap::new(),
             collections: collections::HashSet::new(),
+            state_path
         }
+    }
+
+    pub async fn async_new(
+        state_path: &Path,
+        object_server: &zbus::ObjectServer,
+    ) -> Result<Self, error::Error> {
+        let mut service = Service::new(Some(state_path.to_path_buf()));
+
+        let collections_path = state_path.join("collections");
+        if tokio::fs::try_exists(&collections_path).await.is_ok() {
+            let mut read_dir = tokio::fs::read_dir(&collections_path).await?;
+            while let Ok(entry) = read_dir.next_entry().await {
+                if let Some(entry) = entry {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let data: Vec<u8> = tokio::fs::read(&path).await?;
+                        let collection_result: Result<Collection, serde_json::Error> =
+                            serde_json::from_slice(&data);
+                        match collection_result {
+                            Ok(collection) => {
+                                let collection_alias = collection.alias.clone();
+                                let (collection_path, _) =
+                                    collection.serve_at(object_server).await?;
+                                service.add_collection_path(collection_path, collection_alias);
+                            }
+                            Err(error) => {
+                                log::error!(
+                                    "Can't read jsoned collection on path {} with error {}",
+                                    path.to_string_lossy(),
+                                    error
+                                );
+                            }
+                        }
+                    }
+                    if path.is_dir() {
+                        let mut items_dir = tokio::fs::read_dir(&path).await?;
+                        while let Ok(item_entry) = items_dir.next_entry().await {
+                            if let Some(item_entry) = item_entry {
+                                let path = item_entry.path();
+                                if path.is_file() {
+                                    let data: Vec<u8> = tokio::fs::read(&path).await?;
+                                    let item_result: Result<Item, serde_json::Error> =
+                                        serde_json::from_slice(&data);
+                                    match item_result {
+                                        Ok(item) => {
+                                            let (_, _) =
+                                                item.serve_at(object_server).await?;
+                                        }
+                                        Err(error) => {
+                                            log::error!(
+                                                "Can't read jsoned item on path {} with error {}",
+                                                path.to_string_lossy(),
+                                                error
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        Ok(service)
+    }
+
+    fn add_collection_path(
+        &mut self,
+        collection_path: OwnedObjectPath,
+        collection_alias: Option<String>,
+    ) {
+        log::info!("Created new collection on '{collection_path}'");
+        self.collections.insert(collection_path.clone());
+        if let Some(collection_alias) = collection_alias {
+            self.aliases
+                .insert(collection_alias, collection_path.clone());
+        };
+    }
+
+    async fn collection_to_file(&self, collection: &Collection) -> Result<(), error::Error>{
+        if let Some(state_path) = self.state_path.as_ref() {
+            let jsoned_collection = serde_json::to_vec(collection)?;
+            tokio::fs::write(state_path.join("collections").join(collection.label.as_str()), jsoned_collection).await?;
+        }
+        Ok(())
     }
 }
 
 impl Default for Service {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
@@ -84,16 +176,16 @@ impl Service {
             ),
         };
 
+        self.collection_to_file(&new_collection).await?;
+
         let (collection_path, _) = new_collection.serve_at(object_server).await?;
 
         emitter.collection_created().await?;
 
-        log::info!("Created new collection on '{collection_path}'");
-        self.collections.insert(collection_path.clone());
-        if let Some(collection_alias) = collection_alias {
-            self.aliases
-                .insert(collection_alias.to_string(), collection_path.clone());
-        };
+        self.add_collection_path(
+            collection_path.clone(),
+            collection_alias.map(|alias| alias.to_string()),
+        );
 
         Ok((
             collection_path,
@@ -178,6 +270,7 @@ impl Service {
                     collection.locked = true;
 
                     emitter.collection_changed().await?;
+                    self.collection_to_file(&collection).await?;
 
                     locked.push(collection.get_object_path());
                 }
@@ -220,6 +313,8 @@ impl Service {
                     collection.locked = false;
 
                     emitter.collection_changed().await?;
+
+                    self.collection_to_file(&collection).await?;
 
                     unlocked.push(collection.get_object_path());
                 }
@@ -324,6 +419,7 @@ impl Service {
 
                     let mut collection = collection_interface.get_mut().await;
                     collection.alias = None;
+                    self.collection_to_file(&collection).await?;
                     self.aliases.remove(name);
 
                     Ok(())
@@ -339,6 +435,7 @@ impl Service {
                 .await?;
                 let mut collection = collection_interface.get_mut().await;
                 collection.alias = Some(name.to_string());
+                self.collection_to_file(&collection).await?;
                 self.aliases.remove(name);
                 self.aliases
                     .insert(name.to_string(), collection.get_object_path());
@@ -445,14 +542,14 @@ mod tests {
 
         let cloned_dbus_name = dbus_name.clone();
         let run_server_handle = tokio::spawn(async move {
-            let server = server::SecretServiceServer::new(&cloned_dbus_name, start_event)
+            let server = server::SecretServiceServer::new(&cloned_dbus_name, start_event, None)
                 .await
                 .unwrap();
             server.run().await.unwrap();
         });
 
-        if let Err(_) =
-            tokio::time::timeout(time::Duration::from_secs(10), start_event_listener).await
+        if (tokio::time::timeout(time::Duration::from_secs(10), start_event_listener).await)
+            .is_err()
         {
             if run_server_handle.is_finished() {
                 run_server_handle.await.unwrap();
@@ -895,7 +992,7 @@ mod tests {
             collections::HashMap::from([("key-one".to_string(), "value-one".to_string())]);
 
         let mut created_items: Vec<zvariant::OwnedObjectPath> = Vec::new();
-        for collection_object_path in vec![collection_one_object_path, collection_two_object_path] {
+        for collection_object_path in [collection_one_object_path, collection_two_object_path] {
             let item_properties = item::ItemReadWriteProperties {
                 attributes: item_attributes.clone(),
                 label: "test-item-label".to_owned(),
