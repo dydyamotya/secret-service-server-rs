@@ -30,7 +30,7 @@ impl Service {
         Self {
             aliases: collections::HashMap::new(),
             collections: collections::HashSet::new(),
-            state_path
+            state_path,
         }
     }
 
@@ -41,58 +41,29 @@ impl Service {
         let mut service = Service::new(Some(state_path.to_path_buf()));
 
         let collections_path = state_path.join("collections");
-        if tokio::fs::try_exists(&collections_path).await.is_ok() {
-            let mut read_dir = tokio::fs::read_dir(&collections_path).await?;
-            while let Ok(entry) = read_dir.next_entry().await {
-                if let Some(entry) = entry {
-                    let path = entry.path();
-                    if path.is_file() {
-                        let data: Vec<u8> = tokio::fs::read(&path).await?;
-                        let collection_result: Result<Collection, serde_json::Error> =
-                            serde_json::from_slice(&data);
-                        match collection_result {
-                            Ok(collection) => {
-                                let collection_alias = collection.alias.clone();
-                                let (collection_path, _) =
-                                    collection.serve_at(object_server).await?;
-                                service.add_collection_path(collection_path, collection_alias);
+        log::debug!("{:?}", collections_path);
+        match tokio::fs::try_exists(&collections_path).await {
+            Ok(ebala) => {
+                if ebala {
+                    log::debug!("Collection folder exists with {}. Parsing...", ebala);
+                    let mut read_dir = tokio::fs::read_dir(&collections_path).await?;
+                    while let Ok(entry) = read_dir.next_entry().await {
+                        if let Some(entry) = entry {
+                            let path = entry.path();
+                            if path.is_file() {
+                                create_new_collections(object_server, &mut service, &path).await?;
                             }
-                            Err(error) => {
-                                log::error!(
-                                    "Can't read jsoned collection on path {} with error {}",
-                                    path.to_string_lossy(),
-                                    error
-                                );
+                            if path.is_dir() {
+                                create_new_items(object_server, path).await?;
                             }
                         }
                     }
-                    if path.is_dir() {
-                        let mut items_dir = tokio::fs::read_dir(&path).await?;
-                        while let Ok(item_entry) = items_dir.next_entry().await {
-                            if let Some(item_entry) = item_entry {
-                                let path = item_entry.path();
-                                if path.is_file() {
-                                    let data: Vec<u8> = tokio::fs::read(&path).await?;
-                                    let item_result: Result<Item, serde_json::Error> =
-                                        serde_json::from_slice(&data);
-                                    match item_result {
-                                        Ok(item) => {
-                                            let (_, _) =
-                                                item.serve_at(object_server).await?;
-                                        }
-                                        Err(error) => {
-                                            log::error!(
-                                                "Can't read jsoned item on path {} with error {}",
-                                                path.to_string_lossy(),
-                                                error
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                } else {
+                    tokio::fs::create_dir(&collections_path).await?;
                 }
+            }
+            Err(error) => {
+                log::error!("No collections path");
             }
         };
         Ok(service)
@@ -111,13 +82,72 @@ impl Service {
         };
     }
 
-    async fn collection_to_file(&self, collection: &Collection) -> Result<(), error::Error>{
+    async fn collection_to_file(&self, collection: &Collection) -> Result<(), error::Error> {
         if let Some(state_path) = self.state_path.as_ref() {
             let jsoned_collection = serde_json::to_vec(collection)?;
-            tokio::fs::write(state_path.join("collections").join(collection.label.as_str()), jsoned_collection).await?;
+            tokio::fs::write(
+                state_path
+                    .join("collections")
+                    .join(collection.label.as_str()),
+                jsoned_collection,
+            )
+            .await?;
         }
         Ok(())
     }
+}
+
+async fn create_new_items(
+    object_server: &zbus::ObjectServer,
+    path: PathBuf,
+) -> Result<(), error::Error> {
+    let mut items_dir = tokio::fs::read_dir(&path).await?;
+    while let Ok(item_entry) = items_dir.next_entry().await {
+        if let Some(item_entry) = item_entry {
+            let path = item_entry.path();
+            if path.is_file() {
+                let data: Vec<u8> = tokio::fs::read(&path).await?;
+                let item_result: Result<Item, serde_json::Error> = serde_json::from_slice(&data);
+                match item_result {
+                    Ok(item) => {
+                        let (_, _) = item.serve_at(object_server).await?;
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "Can't read jsoned item on path {} with error {}",
+                            path.to_string_lossy(),
+                            error
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn create_new_collections(
+    object_server: &zbus::ObjectServer,
+    service: &mut Service,
+    path: &PathBuf,
+) -> Result<(), error::Error> {
+    let data: Vec<u8> = tokio::fs::read(path).await?;
+    let collection_result: Result<Collection, serde_json::Error> = serde_json::from_slice(&data);
+    match collection_result {
+        Ok(collection) => {
+            let collection_alias = collection.alias.clone();
+            let (collection_path, _) = collection.serve_at(object_server).await?;
+            service.add_collection_path(collection_path, collection_alias);
+        }
+        Err(error) => {
+            log::error!(
+                "Can't read jsoned collection on path {} with error {}",
+                path.to_string_lossy(),
+                error
+            );
+        }
+    };
+    Ok(())
 }
 
 impl Default for Service {

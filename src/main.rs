@@ -1,5 +1,6 @@
 use std::env;
 use std::path;
+use std::path::PathBuf;
 
 pub mod error;
 pub mod object;
@@ -13,10 +14,16 @@ async fn main() -> Result<(), error::Error> {
     config_path.push(&config_folder);
     config_path.push("secret-service-server");
 
+    let state_folder = if let Some(home_dir) = std::env::home_dir() {
+        home_dir
+    } else {
+        PathBuf::from("$HOME")
+    }.join(".local/share/sss/");
+
     let mut builder = config::Config::builder()
         .set_default("log_level", "INFO")?
         .set_default("dbus_name", "org.freedesktop.secrets")?
-        .set_default("state_folder", "$HOME/.local/share/sss/")?
+        .set_default("state_folder", state_folder.to_str())?
         .add_source(config::Environment::with_prefix("sss"));
 
     builder = if config_path.exists() {
@@ -37,11 +44,12 @@ async fn main() -> Result<(), error::Error> {
     )
     .init();
 
+
     let dbus_name: String = settings
         .get("dbus_name")
         .expect("dus_name defaults to 'org.freedesktop.secrets'");
 
-    let state_folder: String = settings.get("state_folder").expect("state folder defaults to '$HOME/.local/share/sss/'");
+    let state_folder: String = settings.get("state_folder").expect("Somehow no state folder");
     let state_path = path::PathBuf::from(state_folder);
     log::debug!("State path: {:?}", state_path);
     let state_path = match tokio::fs::create_dir_all(&state_path).await {

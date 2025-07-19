@@ -30,6 +30,7 @@ impl SecretServiceServer {
     }
 
     pub async fn run(self) -> Result<(), error::Error> {
+        log::debug!("In run: {:?}", self.state_path.as_ref());
         let service = match self.state_path.as_ref() {
             Some(state_path) => service::Service::async_new(state_path, self.connection.object_server()).await?,
             None => service::Service::new(None)
