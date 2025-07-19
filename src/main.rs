@@ -16,7 +16,7 @@ async fn main() -> Result<(), error::Error> {
     let mut builder = config::Config::builder()
         .set_default("log_level", "INFO")?
         .set_default("dbus_name", "org.freedesktop.secrets")?
-        .set_default("state_folder", "$HOME/.local/share/sss")?
+        .set_default("state_folder", "$HOME/.local/share/sss/")?
         .add_source(config::Environment::with_prefix("sss"));
 
     builder = if config_path.exists() {
@@ -41,13 +41,15 @@ async fn main() -> Result<(), error::Error> {
         .get("dbus_name")
         .expect("dus_name defaults to 'org.freedesktop.secrets'");
 
-    let state_folder: String = settings.get("state_folder").expect("state folder defaults to '$HOME/.local/share/sss'");
+    let state_folder: String = settings.get("state_folder").expect("state folder defaults to '$HOME/.local/share/sss/'");
     let state_path = path::PathBuf::from(state_folder);
+    log::debug!("State path: {:?}", state_path);
     let state_path = match tokio::fs::create_dir_all(&state_path).await {
         Ok(_) => Some(state_path),
         Err(_) => None
     };
 
+    log::debug!("Running server with state_path: {:?}", state_path);
     let server = server::SecretServiceServer::new(&dbus_name, event_listener::Event::new(), state_path).await?;
     server.run().await?;
 
