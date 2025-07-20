@@ -43,9 +43,9 @@ impl Service {
         let collections_path = state_path.join("collections");
         log::debug!("{:?}", collections_path);
         match tokio::fs::try_exists(&collections_path).await {
-            Ok(ebala) => {
-                if ebala {
-                    log::debug!("Collection folder exists with {}. Parsing...", ebala);
+            Ok(is_valid) => {
+                if is_valid {
+                    log::debug!("Collection folder exists with {}. Parsing...", is_valid);
                     let mut read_dir = tokio::fs::read_dir(&collections_path).await?;
                     while let Ok(entry) = read_dir.next_entry().await {
                         if let Some(entry) = entry {
@@ -62,8 +62,8 @@ impl Service {
                     tokio::fs::create_dir(&collections_path).await?;
                 }
             }
-            Err(error) => {
-                log::error!("No collections path");
+            Err(_) => {
+                tokio::fs::create_dir(&collections_path).await?;
             }
         };
         Ok(service)
@@ -85,10 +85,14 @@ impl Service {
     async fn collection_to_file(&self, collection: &Collection) -> Result<(), error::Error> {
         if let Some(state_path) = self.state_path.as_ref() {
             let jsoned_collection = serde_json::to_vec(collection)?;
-            tokio::fs::write(
-                state_path
+
+            let collection_path = state_path
                     .join("collections")
-                    .join(collection.label.as_str()),
+                    .join(collection.label.as_str());
+            tokio::fs::create_dir(&collection_path).await?;
+            tokio::fs::write(
+                    &collection_path
+                    .with_extension(".sscol"),
                 jsoned_collection,
             )
             .await?;
