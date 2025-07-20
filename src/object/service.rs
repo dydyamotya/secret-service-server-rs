@@ -47,7 +47,9 @@ impl Service {
                 if is_valid {
                     log::debug!("Collection folder exists with {}. Parsing...", is_valid);
                     let mut read_dir = tokio::fs::read_dir(&collections_path).await?;
+                    log::debug!("Reading collections directory");
                     while let Ok(entry) = read_dir.next_entry().await {
+                        log::debug!("New entry {:?}", entry);
                         if let Some(entry) = entry {
                             let path = entry.path();
                             if path.is_file() {
@@ -56,6 +58,8 @@ impl Service {
                             if path.is_dir() {
                                 create_new_items(object_server, path).await?;
                             }
+                        } else {
+                            break;
                         }
                     }
                 } else {
@@ -92,7 +96,7 @@ impl Service {
             tokio::fs::create_dir(&collection_path).await?;
             tokio::fs::write(
                     &collection_path
-                    .with_extension(".sscol"),
+                    .with_extension("sscol"),
                 jsoned_collection,
             )
             .await?;
@@ -105,6 +109,7 @@ async fn create_new_items(
     object_server: &zbus::ObjectServer,
     path: PathBuf,
 ) -> Result<(), error::Error> {
+    log::info!("Creating items");
     let mut items_dir = tokio::fs::read_dir(&path).await?;
     while let Ok(item_entry) = items_dir.next_entry().await {
         if let Some(item_entry) = item_entry {
@@ -135,6 +140,7 @@ async fn create_new_collections(
     service: &mut Service,
     path: &PathBuf,
 ) -> Result<(), error::Error> {
+    log::info!("Creating collections");
     let data: Vec<u8> = tokio::fs::read(path).await?;
     let collection_result: Result<Collection, serde_json::Error> = serde_json::from_slice(&data);
     match collection_result {

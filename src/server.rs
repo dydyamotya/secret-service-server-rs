@@ -35,6 +35,7 @@ impl SecretServiceServer {
             Some(state_path) => service::Service::async_new(state_path, self.connection.object_server()).await?,
             None => service::Service::new(None)
         };
+        log::info!("Service created, publishing to dbus");
         let (interface_path, _) = service.serve_at(self.connection.object_server()).await?;
 
         log::info!("Serving Secret Service interface.");
